@@ -1,0 +1,15 @@
+# Entornos y cachés de Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Archivos del sistema y temporales
+.DS_Store
+*.tmp
+*.temp
+~$*.docx
+
+# Archivos generados por QA Tools
+carga casos XRAY *.csv
+Evidencias_APIs_*.docx

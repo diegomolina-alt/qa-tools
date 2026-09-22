@@ -51,24 +51,4 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
-if [ -x ".venv/bin/python" ]; then
-    if ! is_compatible ".venv/bin/python"; then
-        echo "La carpeta .venv existente no usa Python 3.11+ con Tcl/Tk 8.6+."
-        echo "Elimínela manualmente y ejecute nuevamente este script para crearla con: $PYTHON"
-        exit 1
-    fi
-else
-    echo "Creando entorno virtual con: $PYTHON"
-    "$PYTHON" -m venv .venv
-fi
-
-source .venv/bin/activate
-
-if ! python -c "import docx" >/dev/null 2>&1; then
-    echo "Instalando dependencias requeridas..."
-    python -m pip install -r requirements.txt
-fi
-
-echo "Ejecutando con: $(python -c 'import sys; print(sys.executable)')"
-echo "Python/Tk: $(python -c 'import sys, tkinter as tk; print("{} / {}".format(sys.version.split()[0], tk.TkVersion))')"
-exec python app.py
+exec "$PYTHON" "$PROJECT_DIR/bootstrap.py"
