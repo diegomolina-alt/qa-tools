@@ -62,7 +62,7 @@ python app.py
 ## Uso
 
 1. Abra la pestaña **Generar Casos**.
-2. Ingrese el número de Jira, analista QA y el directorio repositorio Xray.
+2. Ingrese el número de Jira, analista QA, directorio repositorio Xray y Dominio.
 3. Pegue los criterios de aceptación. Los encabezados `CA01`, `CA02` o `CA-01` se detectan como criterios independientes.
 4. Seleccione **GENERAR CASOS** y elija la carpeta de destino.
 5. La aplicación crea `carga casos XRAY <JIRA>.csv` en esa carpeta.

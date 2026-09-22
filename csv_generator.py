@@ -29,7 +29,15 @@ def normalize_labels(labels: str) -> str:
 DEFAULT_LABELS = normalize_labels("Manual; URPIPRO")
 
 
-def generate_csv(destination: Path, test_cases: list[TestCase]) -> None:
+def build_summary(domain: str, case_name: str) -> str:
+    """Construye el resumen Xray a partir del dominio y el nombre limpio del caso."""
+    normalized_domain = domain.strip()
+    if not normalized_domain:
+        raise ValueError("El Dominio es obligatorio para construir el resumen del CSV.")
+    return f"{normalized_domain} - {case_name.strip()}"
+
+
+def generate_csv(destination: Path, test_cases: list[TestCase], domain: str) -> None:
     """Crea el CSV UTF-8 separado por comas con una fila por caso de prueba."""
     with destination.open("w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file, delimiter=",")
@@ -38,7 +46,7 @@ def generate_csv(destination: Path, test_cases: list[TestCase]) -> None:
             writer.writerow(
                 [
                     tcid,
-                    f"T-{case.jira} {case.titulo}",
+                    build_summary(domain, case.titulo),
                     "Low",
                     "Cucumber",
                     case.resultado_esperado,

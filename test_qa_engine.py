@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from csv_generator import CSV_HEADERS, generate_csv, normalize_labels, validate_csv_contract
+from csv_generator import CSV_HEADERS, build_summary, generate_csv, normalize_labels, validate_csv_contract
 from qa_engine import generate_test_cases, split_acceptance_criteria
 
 
@@ -55,13 +55,14 @@ Entonces retorna las solicitudes correspondientes"""
 
         with TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "casos.csv"
-            generate_csv(destination, cases)
+            generate_csv(destination, cases, "Urpipro/Loan/Bandeja de entrada")
             with destination.open(encoding="utf-8", newline="") as file:
                 rows = list(csv.DictReader(file))
 
         self.assertEqual(9, len(CSV_HEADERS))
         self.assertEqual(["1", "2"], [row["TCID"] for row in rows])
-        self.assertEqual("T-ADN1-1 Primer caso", rows[0]["Resumen"])
+        self.assertEqual("Urpipro/Loan/Bandeja de entrada - Primer caso", rows[0]["Resumen"])
+        self.assertNotIn("T-ADN1-1", rows[0]["Resumen"])
         self.assertEqual("Dado uno\nCuando uno\nEntonces uno", rows[0]["Definicion en Gherkin"])
         self.assertEqual("Dado dos", rows[1]["Definicion en Gherkin"])
 
@@ -73,7 +74,7 @@ Entonces retorna las solicitudes correspondientes"""
         cases = generate_test_cases("ADN1-2694", "Diego", criteria, repository_directory="DIRECTORIO XRAY")
         with TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "casos.csv"
-            generate_csv(destination, cases)
+            generate_csv(destination, cases, "Urpipro/Loan/Bandeja de entrada")
             validate_csv_contract(destination)
             with destination.open(encoding="utf-8", newline="") as file:
                 rows = list(csv.DictReader(file, delimiter=","))
@@ -81,6 +82,16 @@ Entonces retorna las solicitudes correspondientes"""
         self.assertEqual(3, len(rows))
         self.assertEqual("Manual;URPIPRO", rows[0]["Etiquetas"])
         self.assertTrue(all(label == label.strip() for label in rows[0]["Etiquetas"].split(";")))
+
+    def test_summary_uses_trimmed_domain_and_clean_case_name(self) -> None:
+        self.assertEqual(
+            "Urpipro/Customer/Profile - Cliente existente",
+            build_summary(" Urpipro/Customer/Profile ", " Cliente existente "),
+        )
+
+    def test_summary_requires_domain(self) -> None:
+        with self.assertRaises(ValueError):
+            build_summary("   ", "Cliente existente")
 
 
 if __name__ == "__main__":

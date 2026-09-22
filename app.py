@@ -102,6 +102,7 @@ class QATestGeneratorApp(ttk.Frame):
         self.jira_var = tk.StringVar()
         self.analyst_var = tk.StringVar()
         self.repository_directory_var = tk.StringVar()
+        self.domain_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Listo")
         self.api_evidence_var = tk.BooleanVar(value=False)
         self.mobile_evidence_var = tk.BooleanVar(value=False)
@@ -229,12 +230,14 @@ class QATestGeneratorApp(ttk.Frame):
         ttk.Label(general_card, text="Analista QA:", style="Field.TLabel").grid(row=0, column=2, sticky="w", pady=5, padx=(28, 14))
         ttk.Entry(general_card, textvariable=self.analyst_var).grid(row=0, column=3, sticky="ew", pady=5)
         ttk.Button(general_card, text="↻  NUEVO", command=self.reset_cases, style="New.TButton").grid(
-            row=0, column=4, rowspan=2, sticky="n", padx=(16, 0), pady=5
+            row=0, column=4, rowspan=3, sticky="n", padx=(16, 0), pady=5
         )
         ttk.Label(general_card, text="Directorio repositorio Xray:", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 14))
         ttk.Entry(general_card, textvariable=self.repository_directory_var).grid(
             row=1, column=1, columnspan=3, sticky="ew", pady=5
         )
+        ttk.Label(general_card, text="Dominio:", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=5, padx=(0, 14))
+        ttk.Entry(general_card, textvariable=self.domain_var).grid(row=2, column=1, columnspan=3, sticky="ew", pady=5)
 
         criteria_card = ttk.LabelFrame(tab, text="CRITERIOS DE ACEPTACIÓN", style="Card.TLabelframe", padding=(16, 12))
         criteria_card.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
@@ -451,6 +454,7 @@ class QATestGeneratorApp(ttk.Frame):
         self.jira_var.set("")
         self.analyst_var.set("")
         self.repository_directory_var.set("")
+        self.domain_var.set("")
         self.criteria_text.delete("1.0", "end")
         self.status_var.set("Listo")
 
@@ -479,7 +483,7 @@ class QATestGeneratorApp(ttk.Frame):
 
     def _cases_have_data(self) -> bool:
         return any(
-            value.get().strip() for value in (self.jira_var, self.analyst_var, self.repository_directory_var)
+            value.get().strip() for value in (self.jira_var, self.analyst_var, self.repository_directory_var, self.domain_var)
         ) or bool(self.criteria_text.get("1.0", "end-1c").strip())
 
     def _evidence_has_data(self) -> bool:
@@ -529,6 +533,7 @@ class QATestGeneratorApp(ttk.Frame):
         jira = self.jira_var.get().strip()
         analyst = self.analyst_var.get().strip()
         repository_directory = self.repository_directory_var.get().strip()
+        domain = self.domain_var.get().strip()
         criteria = self.criteria_text.get("1.0", "end-1c").strip()
 
         if not jira:
@@ -539,6 +544,9 @@ class QATestGeneratorApp(ttk.Frame):
             return
         if not repository_directory:
             self._show_required_field("Debe ingresar el directorio repositorio Xray.")
+            return
+        if not domain:
+            self._show_required_field("Ingresa el Dominio para generar los casos.")
             return
         if not criteria:
             self._show_required_field("Debe ingresar los criterios de aceptación.")
@@ -559,7 +567,7 @@ class QATestGeneratorApp(ttk.Frame):
 
         try:
             csv_path = Path(destination) / f"carga casos XRAY {jira}.csv"
-            generate_csv(csv_path, test_cases)
+            generate_csv(csv_path, test_cases, domain)
         except Exception:
             self.status_var.set("No se pudieron generar los casos")
             messagebox.showerror(
