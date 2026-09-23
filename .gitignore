@@ -2,14 +2,21 @@
 .venv/
 __pycache__/
 *.py[cod]
-*.pyo
+.pytest_cache/
 
 # Archivos del sistema y temporales
 .DS_Store
 *.tmp
 *.temp
+*.log
 ~$*.docx
 
 # Archivos generados por QA Tools
 carga casos XRAY *.csv
-Evidencias_APIs_*.docx
+generated/
+
+# Artefactos locales de PyInstaller (el archivo .spec se conserva versionable)
+build/
+dist/
+*.dmg
+QA_Tools_*_Source.zip

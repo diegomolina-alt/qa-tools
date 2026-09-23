@@ -1,0 +1,8 @@
+QA_AGILE=Diego Molina
+FECHA_EJECUCION=23/09/2026
+CASO_PRUEBA=Validación E2E Mobile - Simulación de crédito
+ESTADO=PASSED
+PRECONDICIONES=Usuario habilitado, cliente con data válida, acceso a QA2 y APK instalada
+ENTORNO_PRUEBA=QA2 - Android - App 2.0.0
+RESULTADO_ESPERADO=El usuario puede completar correctamente el flujo de simulación de crédito
+TEST_PLAN=URPIPRO - E2E Mobile

@@ -6,10 +6,34 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from csv_generator import CSV_HEADERS, build_summary, generate_csv, normalize_labels, validate_csv_contract
-from qa_engine import generate_test_cases, split_acceptance_criteria
+from qa_engine import generate_test_cases, normalize_jira_text, split_acceptance_criteria
 
 
 class AcceptanceCriteriaTests(unittest.TestCase):
+    def test_normalize_jira_text_converts_spanish_accents_without_changing_structure(self) -> None:
+        self.assertEqual("a e i o u u n", normalize_jira_text("á é í ó ú ü ñ"))
+        self.assertEqual("A E I O U U N", normalize_jira_text("Á É Í Ó Ú Ü Ñ"))
+        self.assertEqual("Visualizacion del modulo", normalize_jira_text("Visualización del módulo"))
+        self.assertEqual("El nino valido la informacion", normalize_jira_text("El niño validó la información"))
+        self.assertEqual("ANO / CONFIRMACION / EJECUCION", normalize_jira_text("AÑO / CONFIRMACIÓN / EJECUCIÓN"))
+        self.assertEqual("Dado uno\nCuando ocurre: A-B_[x]", normalize_jira_text("Dado uno\nCuando ocurre: A-B_[x]"))
+
+    def test_normalized_criteria_produces_ascii_safe_csv_content(self) -> None:
+        criteria = normalize_jira_text(
+            "CA01: Visualización del módulo\nDado que el niño está autenticado\n"
+            "Cuando ingrese a Crédito\nEntonces deberá visualizar información válida"
+        )
+        cases = generate_test_cases("ADN1-666", "Diego", criteria, repository_directory="XRAY")
+
+        with TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "casos.csv"
+            generate_csv(destination, cases, "Urpipro/Loan/")
+            content = destination.read_text(encoding="utf-8")
+
+        self.assertNotIn("�", content)
+        self.assertTrue(content.isascii())
+        self.assertIn("Urpipro/Loan/Visualizacion del modulo", content)
+        self.assertIn("Dado que el nino esta autenticado", content)
     def test_detects_hyphenated_criteria_and_keeps_gherkin_separate(self) -> None:
         criteria = """CA-01 — Consulta bandeja de solicitudes
 Dado que existe un AdN autenticado
@@ -87,6 +111,15 @@ Entonces retorna las solicitudes correspondientes"""
         self.assertEqual(
             "Urpipro/Customer/Profile - Cliente existente",
             build_summary(" Urpipro/Customer/Profile ", " Cliente existente "),
+        )
+
+    def test_summary_preserves_a_valid_final_slash_without_duplicating_it(self) -> None:
+        self.assertEqual(
+            "Urpipro/Loan/Derivacion App MiBanco/Confirmación y procesamiento de la solicitud",
+            build_summary(
+                "  Urpipro/Loan/Derivacion App MiBanco/  ",
+                " Confirmación y procesamiento de la solicitud ",
+            ),
         )
 
     def test_summary_requires_domain(self) -> None:

@@ -3,24 +3,96 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 from pathlib import Path
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from csv_generator import generate_csv
-from evidence_generator import ApiEvidenceData, EvidenceCase, evidence_filename, generate_api_evidence, parse_xray_tests
-from qa_engine import generate_test_cases
+from evidence_generator import ApiEvidenceData, EvidenceCase, evidence_filename, generate_api_evidence, parse_test_titles
+from mobile_evidence_generator import (
+    MobileEvidenceData,
+    generate_mobile_evidence,
+    mobile_evidence_filename,
+)
+from filename_helpers import sanitize_filename_component
+from qa_engine import generate_test_cases, normalize_jira_text
+from resource_paths import resource_path
+from runtime_workspace import clean_runtime_workspace, configure_runtime_logging
 
 
 MINIMUM_PYTHON = (3, 11)
 MINIMUM_TK = 8.6
+EVIDENCE_TEMPLATES = {
+    "API": "Evidencias_APIs_template.docx",
+    "MOBILE": "Evidencias_Mobile_template.docx",
+}
+LOGGER = logging.getLogger("qa_tools")
 
 
 def downloads_directory() -> Path:
     """Obtiene Descargas del usuario actual o HOME cuando esa carpeta no existe."""
     downloads = Path.home() / "Downloads"
     return downloads if downloads.is_dir() else Path.home()
+
+
+def choose_document_destination(filename: str) -> Path | None:
+    """Solicita un destino final para API o Mobile sin tocar el workspace temporal."""
+    destination = filedialog.askdirectory(
+        title="Seleccionar carpeta donde guardar el documento",
+        initialdir=str(downloads_directory()),
+    )
+    if not destination:
+        return None
+
+    output_path = Path(destination) / filename
+    if output_path.exists() and not messagebox.askyesno(
+        "Archivo existente",
+        f"El archivo ya existe:\n\n{output_path.name}\n\n¿Deseas reemplazarlo?",
+    ):
+        return None
+    return output_path
+
+
+def evidence_template_path(evidence_type: str) -> Path | None:
+    """Obtiene la plantilla exclusiva del tipo elegido en la pantalla de evidencias."""
+    filename = EVIDENCE_TEMPLATES.get(evidence_type)
+    if filename is None:
+        return None
+    try:
+        return resource_path(Path("templates") / filename)
+    except FileNotFoundError as error:
+        label = "API" if evidence_type == "API" else "Mobile"
+        raise FileNotFoundError(f"No se encontró el template de evidencias {label}:\n{error.filename or error}") from error
+
+
+def domain_validation_message(domain: str) -> str | None:
+    """Valida el formato de dominio requerido para los títulos de Test en Xray."""
+    if not domain.strip():
+        return "El campo Dominio es obligatorio."
+    if not domain.strip().endswith("/"):
+        return "El campo Dominio debe finalizar con '/' para generar correctamente los títulos de los Test."
+    return None
+
+
+def install_callback_exception_handler(root: tk.Tk) -> None:
+    """Hace visibles y registrables las excepciones no controladas de callbacks Tk."""
+    def report_callback_exception(exception_type: type[BaseException], exception: BaseException, traceback: object) -> None:
+        LOGGER.error(
+            "TKINTER_CALLBACK_EXCEPTION",
+            exc_info=(exception_type, exception, traceback),
+        )
+        try:
+            messagebox.showerror(
+                "Error inesperado",
+                "Ocurrió un error al ejecutar la operación.\n\nRevisa el registro de QA Tools para más detalles.",
+                parent=root,
+            )
+        except tk.TclError:
+            LOGGER.exception("No se pudo mostrar el error del callback en la interfaz")
+
+    root.report_callback_exception = report_callback_exception
 
 
 def validate_runtime() -> bool:
@@ -90,7 +162,7 @@ class EvidenceCasePanel(ttk.Frame):
 
     def _refresh_header(self) -> None:
         icon = "▼" if self.is_expanded else "▶"
-        self.header_var.set(f"{icon} {self.case.xray_test} - {self.case.title}")
+        self.header_var.set(f"{icon} {self.case.xray_test} - {self.case.display_title}")
 
 
 class QATestGeneratorApp(ttk.Frame):
@@ -104,12 +176,12 @@ class QATestGeneratorApp(ttk.Frame):
         self.repository_directory_var = tk.StringVar()
         self.domain_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Listo")
-        self.api_evidence_var = tk.BooleanVar(value=False)
-        self.mobile_evidence_var = tk.BooleanVar(value=False)
+        self.evidence_type_var = tk.StringVar(value="")
         self.evidence_jira_var = tk.StringVar()
         self.qa_agile_var = tk.StringVar()
         self.service_var = tk.StringVar()
         self.test_plan_var = tk.StringVar()
+        self.test_environment_var = tk.StringVar(value="QA")
         self.evidence_result_var = tk.StringVar(value="Listo")
         self.evidence_panels: list[EvidenceCasePanel] = []
         self.default_qa_agile = self.qa_agile_var.get()
@@ -145,6 +217,7 @@ class QATestGeneratorApp(ttk.Frame):
         style.configure("TLabel", background=background, foreground="#334155")
         style.configure("Field.TLabel", font=("Helvetica", 11, "bold"), foreground="#44546a")
         style.configure("Section.TLabel", font=("Helvetica", 11, "bold"), foreground=navy)
+        style.configure("Description.TLabel", font=("Helvetica", 10), foreground=muted)
         style.configure("Status.TLabel", background="#edf4fa", foreground="#315a80", font=("Helvetica", 11))
 
         style.configure("TEntry", padding=(9, 7), fieldbackground=surface, bordercolor=border)
@@ -211,8 +284,8 @@ class QATestGeneratorApp(ttk.Frame):
 
         cases_tab = ttk.Frame(notebook, padding=18, style="TFrame")
         evidence_tab = ttk.Frame(notebook, padding=18, style="TFrame")
-        notebook.add(cases_tab, text="▤  Generar Casos")
-        notebook.add(evidence_tab, text="▧  Generar Evidencia")
+        notebook.add(cases_tab, text="▤  Generar Test Jira")
+        notebook.add(evidence_tab, text="▧  Generar Docs de Evidencias")
 
         self._build_cases_tab(cases_tab)
         self._build_evidence_tab(evidence_tab)
@@ -225,19 +298,25 @@ class QATestGeneratorApp(ttk.Frame):
         general_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         general_card.columnconfigure(1, weight=1)
         general_card.columnconfigure(3, weight=1)
-        ttk.Label(general_card, text="Número Jira:", style="Field.TLabel").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 14))
-        ttk.Entry(general_card, textvariable=self.jira_var).grid(row=0, column=1, sticky="ew", pady=5)
-        ttk.Label(general_card, text="Analista QA:", style="Field.TLabel").grid(row=0, column=2, sticky="w", pady=5, padx=(28, 14))
-        ttk.Entry(general_card, textvariable=self.analyst_var).grid(row=0, column=3, sticky="ew", pady=5)
+        ttk.Label(
+            general_card,
+            text="Genera el archivo CSV para importar en Jira/Xray y crear los Test a partir de los criterios de aceptación definidos en la card de Jira.",
+            style="Description.TLabel",
+            wraplength=760,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(general_card, text="Número Jira:", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 14))
+        ttk.Entry(general_card, textvariable=self.jira_var).grid(row=1, column=1, sticky="ew", pady=5)
+        ttk.Label(general_card, text="Analista QA:", style="Field.TLabel").grid(row=1, column=2, sticky="w", pady=5, padx=(28, 14))
+        ttk.Entry(general_card, textvariable=self.analyst_var).grid(row=1, column=3, sticky="ew", pady=5)
         ttk.Button(general_card, text="↻  NUEVO", command=self.reset_cases, style="New.TButton").grid(
-            row=0, column=4, rowspan=3, sticky="n", padx=(16, 0), pady=5
+            row=0, column=4, rowspan=4, sticky="n", padx=(16, 0), pady=5
         )
-        ttk.Label(general_card, text="Directorio repositorio Xray:", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 14))
+        ttk.Label(general_card, text="Directorio repositorio Xray:", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=5, padx=(0, 14))
         ttk.Entry(general_card, textvariable=self.repository_directory_var).grid(
-            row=1, column=1, columnspan=3, sticky="ew", pady=5
+            row=2, column=1, columnspan=3, sticky="ew", pady=5
         )
-        ttk.Label(general_card, text="Dominio:", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=5, padx=(0, 14))
-        ttk.Entry(general_card, textvariable=self.domain_var).grid(row=2, column=1, columnspan=3, sticky="ew", pady=5)
+        ttk.Label(general_card, text="Dominio:", style="Field.TLabel").grid(row=3, column=0, sticky="w", pady=5, padx=(0, 14))
+        ttk.Entry(general_card, textvariable=self.domain_var).grid(row=3, column=1, columnspan=3, sticky="ew", pady=5)
 
         criteria_card = ttk.LabelFrame(tab, text="CRITERIOS DE ACEPTACIÓN", style="Card.TLabelframe", padding=(16, 12))
         criteria_card.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
@@ -263,7 +342,7 @@ class QATestGeneratorApp(ttk.Frame):
         ttk.Label(status, textvariable=self.status_var, style="Status.TLabel", padding=(8, 2)).grid(
             row=0, column=1, sticky="ew"
         )
-        ttk.Button(footer, text="▣  GENERAR CASOS", command=self.generate_cases, style="Primary.TButton").grid(
+        ttk.Button(footer, text="▣  GENERAR CSV", command=self.generate_cases, style="Primary.TButton").grid(
             row=0, column=1, sticky="e"
         )
 
@@ -275,27 +354,41 @@ class QATestGeneratorApp(ttk.Frame):
         general_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         general_card.columnconfigure(1, weight=1)
         general_card.columnconfigure(3, weight=1)
-        ttk.Label(general_card, text="Tipo de evidencia:", style="Field.TLabel").grid(row=0, column=0, sticky="w", pady=5, padx=(0, 14))
+        ttk.Label(
+            general_card,
+            text="Genera el documento de evidencias para pruebas de APIs y Mobile.",
+            style="Description.TLabel",
+            wraplength=760,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ttk.Label(general_card, text="Tipo de evidencia:", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=5, padx=(0, 14))
         evidence_type_frame = ttk.Frame(general_card, style="Card.TFrame")
-        evidence_type_frame.grid(row=0, column=1, sticky="w", pady=5)
-        ttk.Checkbutton(evidence_type_frame, text="API", variable=self.api_evidence_var).grid(row=0, column=0, sticky="w")
-        self.mobile_evidence_button = ttk.Checkbutton(
-            evidence_type_frame,
-            text="Mobile (pendiente)",
-            variable=self.mobile_evidence_var,
-            state="disabled",
-        )
-        self.mobile_evidence_button.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        evidence_type_frame.grid(row=1, column=1, sticky="w", pady=5)
+        ttk.Radiobutton(
+            evidence_type_frame, text="API", value="API", variable=self.evidence_type_var, command=self.change_evidence_type
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            evidence_type_frame, text="Mobile", value="MOBILE", variable=self.evidence_type_var, command=self.change_evidence_type
+        ).grid(row=0, column=1, sticky="w", padx=(16, 0))
         ttk.Button(general_card, text="↻  NUEVO", command=self.reset_evidence, style="New.TButton").grid(
-            row=0, column=4, rowspan=2, sticky="n", padx=(16, 0), pady=5
+            row=0, column=4, rowspan=5, sticky="n", padx=(16, 0), pady=5
         )
 
-        self._add_evidence_entry(general_card, "Número Jira:", self.evidence_jira_var, 1)
-        self._add_evidence_entry(general_card, "Test Plan:", self.test_plan_var, 1, column=2, label_padx=(28, 14))
-        self._add_evidence_entry(general_card, "QA Agile:", self.qa_agile_var, 0, column=2, label_padx=(28, 14))
-        self._add_evidence_entry(general_card, "Servicio:", self.service_var, 2, entry_columnspan=3)
+        self._add_evidence_entry(general_card, "Número Jira:", self.evidence_jira_var, 2)
+        self._add_evidence_entry(general_card, "Test Plan:", self.test_plan_var, 2, column=2, label_padx=(28, 14))
+        self._add_evidence_entry(general_card, "QA Agile:", self.qa_agile_var, 1, column=2, label_padx=(28, 14))
+        self.service_label = ttk.Label(general_card, text="Servicio:", style="Field.TLabel")
+        self.service_label.grid(row=3, column=0, sticky="w", pady=5, padx=(0, 14))
+        self.service_entry = ttk.Entry(general_card, textvariable=self.service_var)
+        self.service_entry.grid(row=3, column=1, columnspan=3, sticky="ew", pady=5)
+        self.test_environment_label = ttk.Label(general_card, text="Entorno de prueba:", style="Field.TLabel")
+        self.test_environment_label.grid(row=4, column=0, sticky="w", pady=5, padx=(0, 14))
+        self.test_environment_combo = ttk.Combobox(
+            general_card, textvariable=self.test_environment_var, values=("QA", "STG"), state="readonly"
+        )
+        self.test_environment_combo.grid(row=4, column=1, sticky="ew", pady=5)
 
         content_card = ttk.LabelFrame(tab, text="TÍTULOS DE LOS TEST", style="Card.TLabelframe", padding=(16, 10))
+        self.evidence_content_card = content_card
         content_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         content_card.columnconfigure(0, weight=1)
         titles_frame = ttk.Frame(content_card, style="Card.TFrame")
@@ -348,7 +441,7 @@ class QATestGeneratorApp(ttk.Frame):
         ttk.Label(status, textvariable=self.evidence_result_var, style="Status.TLabel", padding=(8, 2)).grid(
             row=0, column=1, sticky="ew"
         )
-        ttk.Button(footer, text="▣  GENERAR EVIDENCIA", command=self.generate_evidence, style="Primary.TButton").grid(
+        ttk.Button(footer, text="▣  GENERAR DOCUMENTO", command=self.generate_evidence, style="Primary.TButton").grid(
             row=0, column=1, sticky="e"
         )
 
@@ -397,9 +490,12 @@ class QATestGeneratorApp(ttk.Frame):
         ttk.Label(status, textvariable=variable, style="Status.TLabel", padding=(8, 2)).grid(row=0, column=1, sticky="ew")
 
     def load_evidence_cases(self) -> bool:
-        cases = parse_xray_tests(self.test_titles_text.get("1.0", "end-1c"))
+        if self.evidence_type_var.get() not in EVIDENCE_TEMPLATES:
+            self._show_required_field("Seleccione API o Mobile como tipo de evidencia.")
+            return False
+        cases = parse_test_titles(self.test_titles_text.get("1.0", "end-1c"))
         if not cases:
-            self._show_required_field("No se encontraron casos con el formato Xray Test.")
+            self._show_required_field("No se encontraron títulos de test para cargar.")
             return False
 
         for panel in self.evidence_panels:
@@ -415,6 +511,28 @@ class QATestGeneratorApp(ttk.Frame):
         self._set_evidence_cases_count(detected_count)
         self.evidence_result_var.set(f"{detected_count} casos detectados correctamente.")
         return True
+
+    def change_evidence_type(self) -> None:
+        """Conserva la misma captura de datos; solo cambia el generador de salida."""
+        selected_type = self.evidence_type_var.get()
+        if selected_type == "MOBILE":
+            self.service_label.grid_remove()
+            self.service_entry.grid_remove()
+            self.test_environment_label.grid_configure(row=3)
+            self.test_environment_combo.grid_configure(row=3)
+        else:
+            self.service_label.grid()
+            self.service_entry.grid()
+            self.test_environment_label.grid_configure(row=4)
+            self.test_environment_combo.grid_configure(row=4)
+        self.evidence_result_var.set(f"Modo {selected_type}: use CARGAR CASOS con los títulos de Jira.")
+
+    def _clear_evidence_cases(self) -> None:
+        for panel in self.evidence_panels:
+            panel.destroy()
+        self.evidence_panels = []
+        self.cards_canvas.configure(scrollregion=(0, 0, 0, 0))
+        self._set_evidence_cases_count(0)
 
     def expand_evidence_case(self, selected_panel: EvidenceCasePanel) -> None:
         for panel in self.evidence_panels:
@@ -451,6 +569,7 @@ class QATestGeneratorApp(ttk.Frame):
         if self._cases_have_data() and not self._confirm_new_document():
             return
 
+        clean_runtime_workspace()
         self.jira_var.set("")
         self.analyst_var.set("")
         self.repository_directory_var.set("")
@@ -463,18 +582,15 @@ class QATestGeneratorApp(ttk.Frame):
         if self._evidence_has_data() and not self._confirm_new_document():
             return
 
-        self.api_evidence_var.set(False)
-        self.mobile_evidence_var.set(False)
+        clean_runtime_workspace()
+        self.evidence_type_var.set("")
         self.evidence_jira_var.set("")
         self.qa_agile_var.set(self.default_qa_agile)
         self.service_var.set("")
         self.test_plan_var.set("")
+        self.test_environment_var.set("QA")
         self.test_titles_text.delete("1.0", "end")
-        for panel in self.evidence_panels:
-            panel.destroy()
-        self.evidence_panels = []
-        self.cards_canvas.configure(scrollregion=(0, 0, 0, 0))
-        self._set_evidence_cases_count(0)
+        self._clear_evidence_cases()
         self.evidence_result_var.set("Listo")
 
     def _set_evidence_cases_count(self, count: int) -> None:
@@ -488,8 +604,7 @@ class QATestGeneratorApp(ttk.Frame):
 
     def _evidence_has_data(self) -> bool:
         return (
-            self.api_evidence_var.get()
-            or self.mobile_evidence_var.get()
+            bool(self.evidence_type_var.get())
             or any(
                 value.get().strip()
                 for value in (
@@ -530,6 +645,7 @@ class QATestGeneratorApp(ttk.Frame):
         return confirmed.get()
 
     def generate_cases(self) -> None:
+        LOGGER.info("GENERAR_CSV_START")
         jira = self.jira_var.get().strip()
         analyst = self.analyst_var.get().strip()
         repository_directory = self.repository_directory_var.get().strip()
@@ -545,28 +661,34 @@ class QATestGeneratorApp(ttk.Frame):
         if not repository_directory:
             self._show_required_field("Debe ingresar el directorio repositorio Xray.")
             return
-        if not domain:
-            self._show_required_field("Ingresa el Dominio para generar los casos.")
+        domain_error = domain_validation_message(domain)
+        if domain_error:
+            self.status_var.set(domain_error)
+            self._show_required_field(domain_error)
             return
         if not criteria:
             self._show_required_field("Debe ingresar los criterios de aceptación.")
             return
 
-        test_cases = generate_test_cases(jira, analyst, criteria, repository_directory=repository_directory)
+        normalized_criteria = normalize_jira_text(criteria)
+        test_cases = generate_test_cases(jira, analyst, normalized_criteria, repository_directory=repository_directory)
         if not test_cases:
             self._show_required_field("No se encontraron criterios de aceptación identificados con el formato CA-XX.")
             return
 
+        LOGGER.info("GENERAR_CSV_OPEN_DIRECTORY_DIALOG")
         destination = filedialog.askdirectory(
             title="Seleccionar carpeta de destino",
             initialdir=str(downloads_directory()),
         )
         if not destination:
+            LOGGER.info("GENERAR_CSV_CANCELLED")
             self.status_var.set("Generación cancelada")
             return
 
         try:
-            csv_path = Path(destination) / f"carga casos XRAY {jira}.csv"
+            csv_path = Path(destination) / f"carga casos XRAY {sanitize_filename_component(jira, fallback='SIN_JIRA')}.csv"
+            LOGGER.info("GENERAR_CSV_START_WRITE destination=%s", csv_path.parent)
             generate_csv(csv_path, test_cases, domain)
         except Exception:
             self.status_var.set("No se pudieron generar los casos")
@@ -577,10 +699,20 @@ class QATestGeneratorApp(ttk.Frame):
             return
 
         self.status_var.set("Casos generados correctamente.")
+        LOGGER.info("GENERAR_CSV_OK path=%s", csv_path)
         messagebox.showinfo("Generación completada", f"Casos generados correctamente:\n\n{csv_path.name}")
 
     def generate_evidence(self) -> None:
-        template_path = self._selected_evidence_template()
+        LOGGER.info("GENERAR_DOCUMENTO_START type=%s", self.evidence_type_var.get())
+        if self.evidence_type_var.get() == "MOBILE":
+            self.generate_mobile_evidence()
+            return
+        try:
+            template_path = self._selected_evidence_template()
+        except FileNotFoundError as error:
+            self.evidence_result_var.set("No se encontró el template de evidencias API")
+            messagebox.showerror("Template no encontrado", str(error))
+            return
         if template_path is None:
             self._show_required_field("Seleccione un tipo de evidencia para generar el documento.")
             return
@@ -610,14 +742,6 @@ class QATestGeneratorApp(ttk.Frame):
             for panel in self.evidence_panels
         ]
 
-        destination = filedialog.askdirectory(
-            title="Seleccionar carpeta de destino",
-            initialdir=str(downloads_directory()),
-        )
-        if not destination:
-            self.evidence_result_var.set("Generación cancelada")
-            return
-
         data = ApiEvidenceData(
             jira=jira,
             qa_agile=qa_agile,
@@ -625,10 +749,16 @@ class QATestGeneratorApp(ttk.Frame):
             service=service,
             test_plan=self.test_plan_var.get(),
             cases=evidence_cases,
+            test_environment=self.test_environment_var.get(),
         )
-        output_path = Path(destination) / evidence_filename(jira)
+        LOGGER.info("GENERAR_DOCUMENTO_OPEN_DIRECTORY_DIALOG type=API")
+        output_path = choose_document_destination(evidence_filename(jira))
+        if output_path is None:
+            LOGGER.info("GENERAR_DOCUMENTO_CANCELLED type=API")
+            return
 
         try:
+            LOGGER.info("GENERAR_DOCUMENTO_START_WRITE type=API destination=%s", output_path.parent)
             generate_api_evidence(data, template_path, output_path)
         except Exception:
             self.evidence_result_var.set("No se pudo generar la evidencia")
@@ -640,13 +770,58 @@ class QATestGeneratorApp(ttk.Frame):
 
         message = f"Evidencia API generada correctamente: {len(evidence_cases)} tests."
         self.evidence_result_var.set(message)
-        messagebox.showinfo("Generación completada", f"{message}\n\n{output_path.name}")
+        LOGGER.info("GENERAR_DOCUMENTO_OK type=API path=%s", output_path)
+        messagebox.showinfo("Generación completada", f"{message}\n\n{output_path.name}\n\nGuardado en:\n{output_path.parent}")
+
+    def generate_mobile_evidence(self) -> None:
+        """Genera escenarios Mobile desde los mismos casos detectados que consume API."""
+        jira = self.evidence_jira_var.get().strip()
+        qa_agile = self.qa_agile_var.get().strip()
+        if not jira:
+            self._show_required_field("Ingrese el número Jira.")
+            return
+        if not qa_agile:
+            self._show_required_field("Ingrese el analista QA.")
+            return
+        if not self.evidence_panels and not self.load_evidence_cases():
+            return
+
+        data = MobileEvidenceData(
+            qa_agile=qa_agile,
+            execution_date=date.today().strftime("%d/%m/%Y"),
+            test_plan=self.test_plan_var.get().strip(),
+            test_environment=self.test_environment_var.get(),
+        )
+
+        try:
+            template_path = self._selected_evidence_template()
+        except FileNotFoundError as error:
+            self.evidence_result_var.set("No se encontró el template de evidencias Mobile")
+            messagebox.showerror("Template no encontrado", str(error))
+            return
+        LOGGER.info("GENERAR_DOCUMENTO_OPEN_DIRECTORY_DIALOG type=MOBILE")
+        output_path = choose_document_destination(mobile_evidence_filename(jira))
+        if output_path is None:
+            LOGGER.info("GENERAR_DOCUMENTO_CANCELLED type=MOBILE")
+            return
+        try:
+            LOGGER.info("GENERAR_DOCUMENTO_START_WRITE type=MOBILE destination=%s", output_path.parent)
+            generate_mobile_evidence(data, [panel.case for panel in self.evidence_panels], template_path, output_path)
+        except (OSError, ValueError) as error:
+            self.evidence_result_var.set("No se pudo generar el reporte")
+            messagebox.showerror("Error al generar reporte", str(error))
+            return
+
+        self.evidence_result_var.set("Reporte Mobile generado correctamente.")
+        LOGGER.info("GENERAR_DOCUMENTO_OK type=MOBILE path=%s", output_path)
+        messagebox.showinfo(
+            "Generación completada",
+            f"Reporte Mobile generado correctamente:\n\n{output_path.name}\n\nGuardado en:\n{output_path.parent}",
+        )
 
     def _selected_evidence_template(self) -> Path | None:
         """Devuelve la plantilla correspondiente al tipo de evidencia elegido."""
-        if self.api_evidence_var.get():
-            return Path(__file__).parent / "templates" / "Evidencias_APIs_template.docx"
-        return None
+        return evidence_template_path(self.evidence_type_var.get())
 
     @staticmethod
     def _show_required_field(message: str) -> None:
@@ -656,7 +831,10 @@ class QATestGeneratorApp(ttk.Frame):
 def main() -> None:
     if not validate_runtime():
         return
+    configure_runtime_logging()
+    clean_runtime_workspace()
     root = tk.Tk()
+    install_callback_exception_handler(root)
     QATestGeneratorApp(root)
     root.mainloop()
 

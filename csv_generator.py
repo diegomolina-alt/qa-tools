@@ -34,6 +34,8 @@ def build_summary(domain: str, case_name: str) -> str:
     normalized_domain = domain.strip()
     if not normalized_domain:
         raise ValueError("El Dominio es obligatorio para construir el resumen del CSV.")
+    if normalized_domain.endswith("/"):
+        return f"{normalized_domain}{case_name.strip()}"
     return f"{normalized_domain} - {case_name.strip()}"
 
 

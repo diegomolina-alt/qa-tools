@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import unicodedata
 
 
 CA_HEADER_PATTERN = re.compile(
@@ -27,6 +28,14 @@ class TestCase:
     analista: str
     tipo_prueba: str = ""
     directorio_repositorio: str = ""
+
+
+def normalize_jira_text(text: str) -> str:
+    """Convierte caracteres españoles acentuados a equivalentes ASCII sin perder estructura."""
+    if not text:
+        return text
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(character for character in normalized if not unicodedata.combining(character))
 
 
 def split_acceptance_criteria(text: str) -> list[tuple[str, str, str]]:
